@@ -14,12 +14,13 @@ import (
 // recorded. This provides passive agent detection for tools that may not
 // have hooks configured (or whose hooks haven't fired yet).
 type Detector struct {
-	tracker  *Tracker
-	listPane PaneListFunc
-	interval time.Duration
-	log      *logrus.Entry
-	hostID   string // local host fingerprint (for multi-host)
-	hostName string // local host display name
+	tracker     *Tracker
+	listPane    PaneListFunc
+	detectAgent func(int) (Tool, bool)
+	interval    time.Duration
+	log         *logrus.Entry
+	hostID      string // local host fingerprint (for multi-host)
+	hostName    string // local host display name
 
 	// seen tracks panes where an agent was previously detected, so we
 	// don't re-broadcast every scan cycle. Entries are removed when the
@@ -36,12 +37,13 @@ var passiveTools = map[Tool]bool{ToolAgy: true}
 // NewDetector creates a new agent detector.
 func NewDetector(tracker *Tracker, listPane PaneListFunc, interval time.Duration) *Detector {
 	return &Detector{
-		tracker:    tracker,
-		listPane:   listPane,
-		interval:   interval,
-		log:        logrus.WithField("component", "agent-detector"),
-		seen:       make(map[PaneKey]Tool),
-		generation: make(map[PaneKey]uint64),
+		tracker:     tracker,
+		listPane:    listPane,
+		detectAgent: DetectAgentInProcessTree,
+		interval:    interval,
+		log:         logrus.WithField("component", "agent-detector"),
+		seen:        make(map[PaneKey]Tool),
+		generation:  make(map[PaneKey]uint64),
 	}
 }
 
@@ -144,23 +146,31 @@ func (d *Detector) detect() {
 	}
 
 	// Get currently tracked events (hook-based) to avoid interfering
-	tracked := make(map[PaneKey]bool)
+	tracked := make(map[PaneKey]Tool)
 	for _, evt := range d.tracker.GetAll() {
 		tracked[PaneKey{
 			Host:    evt.Host,
 			Session: evt.Session,
 			Window:  evt.Window,
 			Pane:    evt.Pane,
-		}] = true
+		}] = evt.Tool
 	}
 	d.tracker.mu.RLock()
-	for key := range d.tracker.lastActive {
-		tracked[key] = true
+	for key, evt := range d.tracker.lastActive {
+		tracked[key] = evt.Tool
 	}
 	d.tracker.mu.RUnlock()
 
-	// Track which panes still have agents this cycle
+	// Track which panes still have agents this cycle.
 	stillPresent := make(map[PaneKey]bool)
+	var departed []struct {
+		key  PaneKey
+		tool Tool
+	}
+	var arrivals []struct {
+		key  PaneKey
+		tool Tool
+	}
 
 	for _, pane := range panes {
 		if pane.PID == 0 || pane.Session == "" {
@@ -173,56 +183,54 @@ func (d *Detector) detect() {
 			Pane:    pane.PaneID,
 		}
 
-		tool, found := DetectAgentInProcessTree(pane.PID)
+		tool, found := d.detectAgent(pane.PID)
 		if !found {
 			continue
 		}
-		// Passive tools remain detector-owned even while their synthetic waiting
-		// projection is present. Hook-capable tools retain the old handoff.
-		if tracked[key] && !passiveTools[tool] {
-			continue
-		}
-
-		stillPresent[key] = true
 
 		d.mu.Lock()
-		_, alreadySeen := d.seen[key]
-		if !alreadySeen {
+		previous, alreadySeen := d.seen[key]
+		transitioned := alreadySeen && previous != tool
+		if !alreadySeen || transitioned {
 			d.generation[key]++
 		}
 		d.seen[key] = tool
 		d.mu.Unlock()
 
-		if alreadySeen {
+		// Passive tools remain detector-owned even while their synthetic waiting
+		// projection is present. A passive-to-other-tool transition must bypass
+		// the stale projection that it is about to clear.
+		trackedTool, isTracked := tracked[key]
+		if isTracked && !passiveTools[tool] && !transitioned {
 			continue
 		}
 
-		d.log.WithFields(logrus.Fields{
-			"tool":    tool,
-			"session": pane.Session,
-			"window":  pane.Window,
-			"pane":    pane.PaneID,
-			"pid":     pane.PID,
-		}).Debug("detected agent via process tree")
+		stillPresent[key] = true
 
-		d.tracker.Record(&Event{
-			Tool:         tool,
-			Status:       StatusActive,
-			Host:         d.hostID,
-			HostName:     d.hostName,
-			Session:      pane.Session,
-			Window:       pane.Window,
-			Pane:         pane.PaneID,
-			Message:      "auto-detected",
-			AutoDetected: true,
-		})
+		if transitioned && passiveTools[previous] {
+			// Complete the passive projection before starting the replacement
+			// lifecycle. Incrementing generation above invalidates any stale
+			// silence-monitor resume token for the old tool.
+			departed = append(departed, struct {
+				key  PaneKey
+				tool Tool
+			}{key, previous})
+		}
+		if alreadySeen && !transitioned {
+			continue
+		}
+		// A hook may have already started the replacement lifecycle between
+		// scans. In that case clearing Agy is sufficient; do not overwrite the
+		// replacement tool's current status with a synthetic active event.
+		if !isTracked || trackedTool != tool {
+			arrivals = append(arrivals, struct {
+				key  PaneKey
+				tool Tool
+			}{key, tool})
+		}
 	}
 
 	// Clean up panes where the agent is no longer detected
-	var departed []struct {
-		key  PaneKey
-		tool Tool
-	}
 	d.mu.Lock()
 	for key := range d.seen {
 		if !stillPresent[key] {
@@ -247,5 +255,14 @@ func (d *Detector) detect() {
 	}
 	for _, departure := range departed {
 		d.tracker.Record(&Event{Tool: departure.tool, Status: StatusCompleted, Host: d.hostID, HostName: d.hostName, Session: departure.key.Session, Window: departure.key.Window, Pane: departure.key.Pane, Message: "auto-cleared: agent no longer detected", AutoDetected: true})
+	}
+	for _, arrival := range arrivals {
+		d.log.WithFields(logrus.Fields{
+			"tool":    arrival.tool,
+			"session": arrival.key.Session,
+			"window":  arrival.key.Window,
+			"pane":    arrival.key.Pane,
+		}).Debug("detected agent via process tree")
+		d.tracker.Record(&Event{Tool: arrival.tool, Status: StatusActive, Host: d.hostID, HostName: d.hostName, Session: arrival.key.Session, Window: arrival.key.Window, Pane: arrival.key.Pane, Message: "auto-detected", AutoDetected: true})
 	}
 }

@@ -127,13 +127,18 @@ func (sm *SilenceMonitor) sync() {
 		if tool == ToolClaude {
 			continue // Claude has native waiting hooks
 		}
-		if _, already := sm.monitored[paneID]; already {
-			continue
-		}
-
 		info, generation, ok := sm.detector.PassiveToken(paneID, tool)
 		if !ok {
 			continue
+		}
+		if mp, already := sm.monitored[paneID]; already {
+			if mp.tool == tool && mp.generation == generation {
+				continue
+			}
+			// The pane changed tools or was redetected. Replace the monitor
+			// state so a waiting projection and resume token from the prior
+			// generation cannot leak into the new lifecycle.
+			delete(sm.monitored, paneID)
 		}
 
 		sm.log.WithFields(logrus.Fields{
