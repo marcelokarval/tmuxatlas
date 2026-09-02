@@ -86,6 +86,59 @@ func TestHTTPOriginDoesNotTouchLegacyTLSFiles(t *testing.T) {
 	}
 }
 
+func TestNoAuthAllowsAlternateLocalHostForLANPublicURL(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	tmuxClient := &tmux.Client{}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- Run(ctx, &Options{
+			ListenAddress:   address,
+			PublicURL:       "http://10.0.0.10:7654",
+			SocketPath:      filepath.Join(t.TempDir(), "tmuxatlas.sock"),
+			Client:          tmuxClient,
+			StateMgr:        state.NewManager(tmuxClient),
+			Tracker:         toolevents.NewTracker(),
+			ActivityTracker: activity.NewTracker(),
+			AuthEnabled:     false,
+		})
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		resp, err := http.Get("http://" + address + "/api/version")
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("no-auth alternate host returned %s", resp.Status)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no-auth server did not start: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no-auth server did not shut down")
+	}
+}
+
 func TestPublicOriginDoesNotExposeLocalToolEventIngest(t *testing.T) {
 	tempDir, err := os.MkdirTemp("/tmp", "tmuxatlas-router-test-")
 	if err != nil {

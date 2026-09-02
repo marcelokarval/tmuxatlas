@@ -281,9 +281,12 @@ func Run(ctx context.Context, opts *Options) error {
 	if err != nil {
 		return fmt.Errorf("public URL origin: %w", err)
 	}
-	hostValidation, err := hostMiddleware(publicURL)
-	if err != nil {
-		return fmt.Errorf("public URL host: %w", err)
+	var hostValidation func(http.Handler) http.Handler
+	if opts.AuthEnabled {
+		hostValidation, err = hostMiddleware(publicURL)
+		if err != nil {
+			return fmt.Errorf("public URL host: %w", err)
+		}
 	}
 	ingressPolicy, err := ingress.NewPolicy(ingress.DefaultConfig(), nil)
 	if err != nil {
@@ -302,7 +305,9 @@ func Run(ctx context.Context, opts *Options) error {
 	publicRouter.Use(chimiddleware.Recoverer)
 	publicRouter.Use(chimiddleware.StripSlashes)
 	publicRouter.Use(chimiddleware.RequestID)
-	publicRouter.Use(hostValidation)
+	if opts.AuthEnabled {
+		publicRouter.Use(hostValidation)
+	}
 	publicRouter.Use(httpguard.GlobalBodyLimitMiddleware(httpguard.GlobalBodyLimit))
 
 	// API routes
