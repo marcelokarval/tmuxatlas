@@ -70,4 +70,5 @@ Agy is intentionally process-detected only. TmuxAtlas writes no Agy plugin or
 configuration and does not claim a native Agy event contract. A detected Agy
 pane can receive a heuristic waiting state from the silence monitor; resumed
 output restores the synthetic active state, and detector-observed departure
-clears the projection.
+clears the Agy projection without clearing a replacement agent's state on the
+same pane.

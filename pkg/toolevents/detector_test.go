@@ -81,3 +81,33 @@ func TestDetectorCompletesPassiveAgyBeforeStartingReplacementTool(t *testing.T) 
 	default:
 	}
 }
+
+func TestDetectorPreservesReplacementHookWaitingWhenAgyDeparts(t *testing.T) {
+	tracker := NewTracker()
+	sub := tracker.Subscribe()
+	panes := []PaneInfo{{PaneID: "%1", Session: "AGY", Window: 0, PID: 42}}
+	tool := ToolAgy
+	detector := NewDetector(tracker, func() ([]PaneInfo, error) { return panes, nil }, time.Second)
+	detector.detectAgent = func(int) (Tool, bool) { return tool, true }
+	detector.detect()
+	<-sub // initial passive Agy active projection
+
+	tool = ToolOpenCode
+	tracker.Record(&Event{Tool: ToolOpenCode, Status: StatusWaiting, Session: "AGY", Pane: "%1"})
+	<-sub // replacement hook waiting before detector scan
+	detector.detect()
+
+	completed := <-sub
+	if completed.Tool != ToolAgy || completed.Status != StatusCompleted {
+		t.Fatalf("transition event = %#v, want Agy completed", completed)
+	}
+	select {
+	case unexpected := <-sub:
+		t.Fatalf("replacement hook lifecycle was overwritten: %#v", unexpected)
+	default:
+	}
+	events := tracker.GetAll()
+	if len(events) != 1 || events[0].Tool != ToolOpenCode || events[0].Status != StatusWaiting {
+		t.Fatalf("replacement waiting state was not preserved: %#v", events)
+	}
+}
