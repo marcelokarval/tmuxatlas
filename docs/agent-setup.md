@@ -34,10 +34,11 @@ tmuxatlas agent-setup --block
 
 ### Agy
 
-**Auto-detected; no hook is configured.** Agy is shown as `auto-detected` in
-Settings when its executable or running pane is found. Its waiting state is a
-TmuxAtlas silence heuristic, not an Agy lifecycle event contract. `agent-setup`
-does not create or change any Agy configuration.
+**Auto-detected; no hook is configured.** Settings shows Agy as
+`auto-detected` when its executable is found. Running panes are discovered
+separately by process-tree detection. Its waiting state is a TmuxAtlas silence
+heuristic, not an Agy lifecycle event contract. `agent-setup` does not create
+or change any Agy configuration.
 
 ### Claude Code
 

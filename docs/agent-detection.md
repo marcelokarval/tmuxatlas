@@ -116,7 +116,10 @@ The detector (`pkg/toolevents/detector.go`) runs every 5 seconds:
 
 ### Silence Monitor + Capture-Pane
 
-The silence monitor (`pkg/toolevents/silence.go`) watches panes with agents that lack native waiting hooks (currently Codex and Copilot):
+The silence monitor (`pkg/toolevents/silence.go`) watches detected non-Claude
+panes. It supplies waiting-state detection for agents without native waiting
+hooks (currently Codex, Copilot, and passive Agy); agents with native hooks use
+their hook events when available:
 1. Tracks last output time per pane via `%output` control mode notifications
 2. When a pane has been quiet for 10+ seconds, runs `tmux capture-pane -p` to get visible text
 3. Passes the last ~10 non-empty lines to `DetectPrompt()` which checks for:
