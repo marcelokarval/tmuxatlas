@@ -16,6 +16,7 @@ const (
 	ToolCodex    Tool = "codex"
 	ToolCopilot  Tool = "copilot"
 	ToolOpenCode Tool = "opencode"
+	ToolAgy      Tool = "agy"
 )
 
 // Status represents the current state of an agent

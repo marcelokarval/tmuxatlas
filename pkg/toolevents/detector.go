@@ -24,18 +24,24 @@ type Detector struct {
 	// seen tracks panes where an agent was previously detected, so we
 	// don't re-broadcast every scan cycle. Entries are removed when the
 	// agent process is no longer found.
-	mu   sync.Mutex
-	seen map[PaneKey]Tool
+	mu                     sync.Mutex
+	scanMu                 sync.Mutex
+	seen                   map[PaneKey]Tool
+	generation             map[PaneKey]uint64
+	beforePassiveDeparture func() // test seam; nil in production
 }
+
+var passiveTools = map[Tool]bool{ToolAgy: true}
 
 // NewDetector creates a new agent detector.
 func NewDetector(tracker *Tracker, listPane PaneListFunc, interval time.Duration) *Detector {
 	return &Detector{
-		tracker:  tracker,
-		listPane: listPane,
-		interval: interval,
-		log:      logrus.WithField("component", "agent-detector"),
-		seen:     make(map[PaneKey]Tool),
+		tracker:    tracker,
+		listPane:   listPane,
+		interval:   interval,
+		log:        logrus.WithField("component", "agent-detector"),
+		seen:       make(map[PaneKey]Tool),
+		generation: make(map[PaneKey]uint64),
 	}
 }
 
@@ -75,6 +81,36 @@ func (d *Detector) PaneInfo(paneID string) PaneInfo {
 	return PaneInfo{}
 }
 
+func (d *Detector) PassiveToken(paneID string, tool Tool) (PaneInfo, uint64, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for key, seenTool := range d.seen {
+		if key.Pane == paneID && seenTool == tool {
+			return PaneInfo{PaneID: key.Pane, Session: key.Session, Window: key.Window}, d.generation[key], true
+		}
+	}
+	return PaneInfo{}, 0, false
+}
+
+func (d *Detector) ValidatePassive(paneID string, tool Tool, generation uint64) (PaneInfo, bool) {
+	info, actual, ok := d.PassiveToken(paneID, tool)
+	return info, ok && actual == generation
+}
+
+// RecordPassiveActive serializes validation and projection with scans. The
+// tracker broadcast occurs after detector state validation and never under d.mu.
+func (d *Detector) RecordPassiveActive(paneID string, tool Tool, generation uint64, hostID, hostName string) bool {
+	d.scanMu.Lock()
+	info, ok := d.ValidatePassive(paneID, tool, generation)
+	if !ok {
+		d.scanMu.Unlock()
+		return false
+	}
+	d.tracker.Record(&Event{Tool: tool, Status: StatusActive, Host: hostID, HostName: hostName, Session: info.Session, Window: info.Window, Pane: paneID, Message: "output resumed", AutoDetected: true})
+	d.scanMu.Unlock()
+	return true
+}
+
 // Run starts the detection loop. It blocks until ctx is cancelled.
 func (d *Detector) Run(ctx context.Context) {
 	d.log.WithField("interval", d.interval).Info("starting agent detector")
@@ -95,9 +131,16 @@ func (d *Detector) Run(ctx context.Context) {
 
 // detect scans all panes and looks for agent processes.
 func (d *Detector) detect() {
-	panes := d.listPane()
-	if len(panes) == 0 {
+	d.scanMu.Lock()
+	defer d.scanMu.Unlock()
+	panes, err := d.listPane()
+	if err != nil {
+		d.log.WithError(err).Warn("agent pane inventory failed; preserving detector state")
 		return
+	}
+	if len(panes) == 0 {
+		// An empty successful inventory is authoritative and falls through to
+		// departure cleanup below.
 	}
 
 	// Get currently tracked events (hook-based) to avoid interfering
@@ -130,13 +173,13 @@ func (d *Detector) detect() {
 			Pane:    pane.PaneID,
 		}
 
-		// Skip panes with hook-based tracking
-		if tracked[key] {
-			continue
-		}
-
 		tool, found := DetectAgentInProcessTree(pane.PID)
 		if !found {
+			continue
+		}
+		// Passive tools remain detector-owned even while their synthetic waiting
+		// projection is present. Hook-capable tools retain the old handoff.
+		if tracked[key] && !passiveTools[tool] {
 			continue
 		}
 
@@ -144,6 +187,9 @@ func (d *Detector) detect() {
 
 		d.mu.Lock()
 		_, alreadySeen := d.seen[key]
+		if !alreadySeen {
+			d.generation[key]++
+		}
 		d.seen[key] = tool
 		d.mu.Unlock()
 
@@ -173,6 +219,10 @@ func (d *Detector) detect() {
 	}
 
 	// Clean up panes where the agent is no longer detected
+	var departed []struct {
+		key  PaneKey
+		tool Tool
+	}
 	d.mu.Lock()
 	for key := range d.seen {
 		if !stillPresent[key] {
@@ -181,8 +231,21 @@ func (d *Detector) detect() {
 				"window":  key.Window,
 				"pane":    key.Pane,
 			}).Debug("agent no longer detected in pane")
+			tool := d.seen[key]
 			delete(d.seen, key)
+			if passiveTools[tool] {
+				departed = append(departed, struct {
+					key  PaneKey
+					tool Tool
+				}{key, tool})
+			}
 		}
 	}
 	d.mu.Unlock()
+	if len(departed) > 0 && d.beforePassiveDeparture != nil {
+		d.beforePassiveDeparture()
+	}
+	for _, departure := range departed {
+		d.tracker.Record(&Event{Tool: departure.tool, Status: StatusCompleted, Host: d.hostID, HostName: d.hostName, Session: departure.key.Session, Window: departure.key.Window, Pane: departure.key.Pane, Message: "auto-cleared: agent no longer detected", AutoDetected: true})
+	}
 }

@@ -82,6 +82,16 @@ Each layer fills gaps left by the ones above it. An agent with hooks configured 
 
 **Process tree match:** Binary named `opencode`.
 
+### Agy
+
+**Detection:** Passive process-tree detection. Agy has no generated TmuxAtlas
+plugin or hook because no stable lifecycle callback contract is assumed.
+
+**Waiting detection:** Heuristic silence and prompt detection. Resumed pane
+output clears a synthetic waiting state while the process is still detected.
+
+**Process tree match:** Exact executable basename `agy`.
+
 ## How Each Layer Works
 
 ### Hook-Based Detection
