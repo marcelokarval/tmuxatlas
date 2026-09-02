@@ -714,8 +714,8 @@ func Run(ctx context.Context, opts *Options) error {
 			ptyHandler.HandleSession(w, req)
 		})
 	} else {
-		publicRouter.With(originMiddleware, admissionMiddleware(ingressPolicy, ingress.CategoryWSTerminal)).Get("/ws/events", hub.HandleEvents)
-		publicRouter.With(originMiddleware, admissionMiddleware(ingressPolicy, ingress.CategoryWSTerminal)).Get("/ws/session", func(w http.ResponseWriter, req *http.Request) {
+		publicRouter.With(admissionMiddleware(ingressPolicy, ingress.CategoryWSTerminal)).Get("/ws/events", hub.HandleEvents)
+		publicRouter.With(admissionMiddleware(ingressPolicy, ingress.CategoryWSTerminal)).Get("/ws/session", func(w http.ResponseWriter, req *http.Request) {
 			hostID := req.URL.Query().Get("host")
 			if opts.PeerMgr == nil || hostID == "" || !opts.PeerMgr.HasHost(hostID) {
 				http.Error(w, "explicit known host is required", http.StatusBadRequest)
